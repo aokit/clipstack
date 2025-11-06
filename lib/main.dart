@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:system_tray/system_tray.dart' as sys_tray;
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:window_manager/window_manager.dart';
 
 import 'clipboard_manager.dart';
 import 'clipboard_history_item.dart';
@@ -11,29 +12,59 @@ import 'clipboard_history_item.dart';
 // グローバルオブジェクト
 final ClipboardManager clipboardManager = ClipboardManager();
 
+// ★ 1. ウィンドウ操作を分離する関数 (Future.delayed でブロック回避) ★
+Future<void> toggleWindowVisibility() async {
+  // 処理全体を Future.delayed でラップし、イベントキューから完全に分離する
+  Future.delayed(Duration.zero, () async {
+    bool isVisible = await WindowManager.instance.isVisible();
+    if (isVisible) {
+      await WindowManager.instance.hide();
+    } else {
+      // 表示する際は、画面右上隅に移動
+      await WindowManager.instance.setAlignment(Alignment.topRight);
+      await WindowManager.instance.show();
+      await WindowManager.instance.focus();
+    }
+  });
+}
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Hiveとクリップボード監視の初期化
+  await WindowManager.instance.ensureInitialized();
+
+  // ウィンドウの初期設定
+  windowManager.setMinimumSize(const Size(320, 480));
+  windowManager.setSize(const Size(320, 480));
+  windowManager.setAlignment(Alignment.topRight);
+  windowManager.setAlwaysOnTop(true);
+  windowManager.setSkipTaskbar(true);
+
   await Hive.initFlutter();
   await clipboardManager.init();
 
-  // システムトレイの初期化
   await initSystemTray();
 
   runApp(const MyApp());
 }
 
-class MyApp extends StatelessWidget {
+class MyApp extends StatelessWidget with WindowListener {
   const MyApp({super.key});
 
   @override
   Widget build(BuildContext context) {
+    WindowManager.instance.addListener(this);
+    WindowManager.instance.setTitle('クリップボード履歴');
+
     return const MaterialApp(title: 'クリップボード履歴', home: HistoryScreen());
+  }
+
+  @override
+  void onWindowMinimize() {
+    WindowManager.instance.hide();
   }
 }
 
-// System Trayの初期化と設定
 Future<void> initSystemTray() async {
   final sys_tray.SystemTray systemTray = sys_tray.SystemTray();
 
@@ -60,32 +91,34 @@ Future<void> initSystemTray() async {
 
   await systemTray.setContextMenu(menu);
 
-  // ★★★ 修正箇所: イベントハンドラをMapキャストで安全にプロパティにアクセス ★★★
-  systemTray.registerSystemTrayEventHandler((event) {
-    // eventをMapとしてキャストし、'type'キーからイベントタイプを取得
+  // イベントハンドラ (asyncであることを確認)
+  systemTray.registerSystemTrayEventHandler((event) async {
     final eventMap = event as Map<String, dynamic>;
     final eventType = eventMap['type'] as String?;
 
     if (eventType == 'leftMouseUp') {
-      // TODO: 左クリック時のウィンドウ表示/非表示ロジック
+      // ★ await なしで呼び出し、ブロックを回避
+      toggleWindowVisibility();
     } else if (eventType == 'menuItemClick') {
-      // 'menuItem'キーからメニューデータ（Map）を取得し、'index'キーからインデックスを取得
       final menuItemData = eventMap['menuItem'] as Map<String, dynamic>?;
       final index = menuItemData?['index'] as int?;
 
       if (index == 0) {
         // '履歴を表示'
-        // TODO: ウィンドウ表示ロジック
+        // ★ await なしで呼び出し
+        toggleWindowVisibility();
       } else if (index == 1) {
         // '履歴をクリア'
         clipboardManager.clearHistory();
       } else if (index == 2) {
-        // '終了'
-        systemTray.destroy();
+        // '終了' (ここだけは await して確実に終了させる)
+        await systemTray.destroy();
         exit(0);
       }
     }
   });
+
+  await WindowManager.instance.hide();
 }
 
 class HistoryScreen extends StatelessWidget {
@@ -93,18 +126,22 @@ class HistoryScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // ValueListenableBuilderでHive Boxの変更をリスニング
     return ValueListenableBuilder<Box<ClipboardHistoryItem>>(
       valueListenable: Hive.box<ClipboardHistoryItem>(
         'clipboardHistoryBox',
       ).listenable(),
       builder: (context, box, widget) {
-        // 履歴を逆順（最新が上）にして表示
         final items = box.values.toList().reversed.toList();
 
         return Scaffold(
           appBar: AppBar(
             title: const Text('クリップボード履歴'),
+            leading: IconButton(
+              icon: const Icon(Icons.close),
+              onPressed: () {
+                WindowManager.instance.hide();
+              },
+            ),
             actions: [
               IconButton(
                 icon: const Icon(Icons.delete_forever),
@@ -124,9 +161,7 @@ class HistoryScreen extends StatelessWidget {
                 ),
                 subtitle: Text(item.timestamp.toString()),
                 onTap: () {
-                  // タップでその内容をクリップボードにコピー
                   Clipboard.setData(ClipboardData(text: item.content));
-                  // コピー完了のフィードバック
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(content: Text('履歴をクリップボードにコピーしました')),
                   );
@@ -139,6 +174,7 @@ class HistoryScreen extends StatelessWidget {
     );
   }
 }
+
 /*
 // main.dart
 
