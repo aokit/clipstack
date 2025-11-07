@@ -1,9 +1,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:system_tray/system_tray.dart' as sys_tray;
 import 'package:hive_flutter/hive_flutter.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'clipboard_manager.dart';
@@ -12,9 +10,9 @@ import 'clipboard_history_item.dart';
 // グローバルオブジェクト
 final ClipboardManager clipboardManager = ClipboardManager();
 
-// ★ 1. ウィンドウ操作を分離する関数 (Future.delayed でブロック回避) ★
+// ★ 1. ウィンドウ操作を分離する関数 (Future.delayed はブロック回避のために維持) ★
+// ネイティブ側からこの関数を呼び出す
 Future<void> toggleWindowVisibility() async {
-  // 処理全体を Future.delayed でラップし、イベントキューから完全に分離する
   Future.delayed(Duration.zero, () async {
     bool isVisible = await WindowManager.instance.isVisible();
     if (isVisible) {
@@ -43,10 +41,29 @@ void main() async {
   await Hive.initFlutter();
   await clipboardManager.init();
 
-  await initSystemTray();
+  // ★ 2. Nativeからのメッセージを受け取るための MethodChannel を設定 ★
+  const platform = MethodChannel('com.clipstack.tray');
+  platform.setMethodCallHandler((call) async {
+    switch (call.method) {
+      case 'toggleWindow':
+        // Swiftからの左クリック/メニュー表示命令
+        toggleWindowVisibility();
+        break;
+      case 'clearHistory':
+        // Swiftからの履歴クリア命令
+        clipboardManager.clearHistory();
+        break;
+      // Swift側でアプリ終了をNSApp.terminateで行うため、Flutter側でのexit(0)は不要
+    }
+  });
 
   runApp(const MyApp());
+
+  // 起動時にウィンドウを非表示
+  await WindowManager.instance.hide();
 }
+
+// ★ initSystemTray() 関数は、Swiftに処理を移すため、削除またはコメントアウトします。
 
 class MyApp extends StatelessWidget with WindowListener {
   const MyApp({super.key});
@@ -63,62 +80,6 @@ class MyApp extends StatelessWidget with WindowListener {
   void onWindowMinimize() {
     WindowManager.instance.hide();
   }
-}
-
-Future<void> initSystemTray() async {
-  final sys_tray.SystemTray systemTray = sys_tray.SystemTray();
-
-  String iconPath = 'assets/app_icon.png';
-
-  if (Platform.isWindows) {
-    iconPath = 'assets/app_icon.ico';
-  } else if (Platform.isMacOS) {
-    iconPath = 'assets/app_icon.png';
-  }
-
-  await systemTray.initSystemTray(
-    iconPath: iconPath,
-    title: "クリップボード履歴",
-    toolTip: "クリップボード履歴管理アプリ",
-  );
-
-  final sys_tray.Menu menu = sys_tray.Menu();
-  await menu.buildFrom([
-    sys_tray.MenuItemLabel(label: '履歴を表示'), // Index 0
-    sys_tray.MenuItemLabel(label: '履歴をクリア'), // Index 1
-    sys_tray.MenuItemLabel(label: '終了'), // Index 2
-  ]);
-
-  await systemTray.setContextMenu(menu);
-
-  // イベントハンドラ (asyncであることを確認)
-  systemTray.registerSystemTrayEventHandler((event) async {
-    final eventMap = event as Map<String, dynamic>;
-    final eventType = eventMap['type'] as String?;
-
-    if (eventType == 'leftMouseUp') {
-      // ★ await なしで呼び出し、ブロックを回避
-      toggleWindowVisibility();
-    } else if (eventType == 'menuItemClick') {
-      final menuItemData = eventMap['menuItem'] as Map<String, dynamic>?;
-      final index = menuItemData?['index'] as int?;
-
-      if (index == 0) {
-        // '履歴を表示'
-        // ★ await なしで呼び出し
-        toggleWindowVisibility();
-      } else if (index == 1) {
-        // '履歴をクリア'
-        clipboardManager.clearHistory();
-      } else if (index == 2) {
-        // '終了' (ここだけは await して確実に終了させる)
-        await systemTray.destroy();
-        exit(0);
-      }
-    }
-  });
-
-  await WindowManager.instance.hide();
 }
 
 class HistoryScreen extends StatelessWidget {
